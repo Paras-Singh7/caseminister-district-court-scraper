@@ -8,8 +8,8 @@ from datetime import datetime
 import pytesseract
 import requests
 from azure.storage.blob import BlobServiceClient
-from PIL import Image
 from dotenv import load_dotenv
+from PIL import Image
 from pymongo import MongoClient
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -17,6 +17,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
 from selenium.webdriver.support.ui import WebDriverWait
+
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 load_dotenv()
 
@@ -216,6 +218,78 @@ def extract_case_details(driver):
         except:
             case_data["acts"] = []
 
+        # Case History
+        try:
+            history_rows = driver.find_elements(
+                By.CSS_SELECTOR, "table.history_table tbody tr"
+            )
+            case_history = []
+
+            for row in history_rows:
+                temp = {}
+
+                # getting value from cells
+                cells = row.find_elements(By.TAG_NAME, "td")
+                if len(cells) >= 4:
+                    temp["judge"] = cells[0].text.strip() if cells[0].text else ""
+                    temp["date"] = cells[1].text.strip() if cells[1].text else ""
+                    temp["hearing_date"] = (
+                        cells[2].text.strip() if cells[2].text else ""
+                    )
+                    temp["purpose_of_hearing"] = (
+                        cells[3].text.strip() if cells[3].text else ""
+                    )
+
+                    # getting business details
+                    link = cells[1].find_element(By.TAG_NAME, "a")
+                    driver.execute_script("arguments[0].click();", link)
+                    time.sleep(1)
+
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "div#caseBusinessDiv_caseType")
+                        )
+                    )
+
+                    business_rows = driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "div#caseBusinessDiv_caseType div center center table tr",
+                    )
+                    temp2 = {}
+                    for row2 in business_rows[1:]:
+                        try:
+                            cells2 = row2.find_elements(By.TAG_NAME, "td")
+                            label = cells2[0].text.strip()
+                            if "Business" in label:
+                                temp2["business"] = cells2[2].text.strip()
+                            elif "Next Purpose" in label:
+                                temp2["next_purpose"] = cells2[2].text.strip()
+                            elif "Next Hearing Date" in label:
+                                temp2["next_hearing_date"] = cells2[2].text.strip()
+                            elif "Nature of Disposal" in label:
+                                temp2["nature_of_disposal"] = cells2[2].text.strip()
+                            elif "Disposal Date" in label:
+                                temp2["disposal_date"] = cells2[2].text.strip()
+                        except Exception as e:
+                            print(e)
+                            continue
+
+                    driver.execute_script("back_fun('CScaseType')")
+
+                    WebDriverWait(driver, 10).until(
+                        EC.invisibility_of_element_located(
+                            (By.ID, "caseBusinessDiv_caseType")
+                        )
+                    )
+
+                    temp["business_on_date"] = temp2
+                    case_history.append(temp)
+
+            case_data["history"] = case_history
+        except Exception as e:
+            logger.error(f"Exception: {e}")
+            case_data["history"] = []
+
         # Orders
         orders = []
         try:
@@ -256,10 +330,12 @@ def extract_case_details(driver):
                                         save_path, case_data["details"]
                                     )
                                     clean_up(save_path)
+                                else:
+                                    new_url = ""
 
                                 order_info["url"] = new_url
                         except Exception as ex:
-                            print(
+                            logger.error(
                                 f"Error downloading PDF for order {order_info['order_number']}: {str(ex)}"
                             )
                         finally:
@@ -281,12 +357,12 @@ def extract_case_details(driver):
                         orders.append(order_info)
             case_data["orders"] = orders
         except Exception as e:
-            print(f"Error processing orders: {str(e)}")
+            logger.error(f"Error processing orders: {str(e)}")
 
         return case_data
 
     except Exception as e:
-        print(f"Error in extract_case_details: {str(e)}")
+        logger.error(f"Error in extract_case_details: {str(e)}")
         return case_data
 
 
@@ -297,7 +373,9 @@ def save_to_mongodb(data):
 def upload_pdf_to_azure(file_path, details):
     try:
         blob_name = file_path.split("/")[-1]
-        blob_service_client = BlobServiceClient.from_connection_string(os.getenv("AZURE_CONNECTION_STRING"))
+        blob_service_client = BlobServiceClient.from_connection_string(
+            os.getenv("AZURE_CONNECTION_STRING")
+        )
         blob_client = blob_service_client.get_blob_client(
             container=os.getenv("AZURE_CONTAINER_NAME"), blob=blob_name
         )
@@ -336,144 +414,157 @@ if __name__ == "__main__":
     driver = webdriver.Chrome()
     wait = WebDriverWait(driver, 20)
 
-    for button_id in ["radPCT", "radDCT"]:
-        try:
-            driver.get(url)
-            time.sleep(3)
+    case_type_options = [
+        "CS (COMM) - CIVIL SUIT (COMMERCIAL)",
+        "EX - EXECUTION",
+        "MISC DJ - MISC. CASES FOR DJ ADJ",
+        "OMP (COMM) - COMMERCIAL ARBITRATION U/S 34",
+        "OMP (I)(COMM.) - Commercial Arbitration U/s 9",
+    ]
 
-            # Click "Case Status"
-            element = wait.until(EC.element_to_be_clickable((By.ID, "leftPaneMenuCS")))
-            element.click()
-            time.sleep(2)
-
-            # State
-            state_dropdown = Select(
-                wait.until(EC.presence_of_element_located((By.ID, "sess_state_code")))
-            )
-            state_dropdown.select_by_visible_text(state)
-            time.sleep(3)
-
-            # District
-            dist_dropdown = Select(
-                wait.until(EC.presence_of_element_located((By.ID, "sess_dist_code")))
-            )
-            dist_dropdown.select_by_visible_text(district)
-            time.sleep(3)
-
-            # Court complex
-            court_dropdown = Select(
-                wait.until(
-                    EC.presence_of_element_located((By.ID, "court_complex_code"))
-                )
-            )
-            court_dropdown.select_by_visible_text(court_complex)
-            time.sleep(2)
-
-            # Close any "validateError" modal if present
+    for case_type_option in case_type_options:
+        for button_id in ["radDCT", "radPCT"]:
             try:
-                driver.execute_script("closeModel({modal_id:'validateError'})")
-                time.sleep(2)
-            except:
-                pass
+                driver.get(url)
+                time.sleep(3)
 
-            # Case type button
-            case_type_button = wait.until(
-                EC.element_to_be_clickable((By.ID, "casetype-tabMenu"))
-            )
-            case_type_button.click()
-            time.sleep(3)
-
-            # Select "CS (COMM) - CIVIL SUIT (COMMERCIAL)"
-            case_type_dropdown = Select(
-                wait.until(EC.presence_of_element_located((By.ID, "case_type_2")))
-            )
-            case_type_dropdown.select_by_visible_text(
-                "CS (COMM) - CIVIL SUIT (COMMERCIAL)"
-            )
-
-            # Year input
-            year_input = wait.until(
-                EC.presence_of_element_located((By.ID, "search_year"))
-            )
-            year_input.clear()
-            year_input.send_keys("2024")
-
-            # Close any leftover modal
-            try:
-                driver.execute_script("closeModel({modal_id:'validateError'})")
-                time.sleep(2)
-            except:
-                pass
-
-            # Select "Disposed" radio button
-            disposed_radio_button = wait.until(
-                EC.element_to_be_clickable((By.ID, button_id))
-            )
-            driver.execute_script("arguments[0].click();", disposed_radio_button)
-            time.sleep(2)
-
-            # Solve Captcha
-            captcha_image_element = wait.until(
-                EC.presence_of_element_located((By.ID, "captcha_image"))
-            )
-            captcha_image_element.screenshot("temp.png")
-            captcha_image = Image.open("temp.png")
-            captcha_text = pytesseract.image_to_string(captcha_image)
-
-            captcha_input = wait.until(
-                EC.presence_of_element_located((By.ID, "ct_captcha_code"))
-            )
-            captcha_input.clear()
-            captcha_input.send_keys(captcha_text)
-
-            # Submit
-            driver.execute_script("submitCaseType();")
-            time.sleep(5)
-
-            # ------------------ COLLECT ALL CASE LINKS ------------------
-            # Instead of just first "View" link, get them all
-            view_buttons = wait.until(
-                EC.presence_of_all_elements_located((By.XPATH, "//a[text()='View']"))
-            )
-
-            print(f"Found {len(view_buttons)} cases on this page.")
-
-            # Loop over each result
-            for i in range(len(view_buttons)):
-                # Because going back can stale the references, re-find them each iteration
-                view_buttons = driver.find_elements(By.XPATH, "//a[text()='View']")
-
-                # Click the i-th "View" link
-                driver.execute_script(
-                    "arguments[0].scrollIntoView(true);", view_buttons[i]
+                # Click "Case Status"
+                element = wait.until(
+                    EC.element_to_be_clickable((By.ID, "leftPaneMenuCS"))
                 )
-                time.sleep(1)
-                driver.execute_script("arguments[0].click();", view_buttons[i])
+                element.click()
                 time.sleep(2)
 
-                # Extract details & download PDFs
-                case_data = extract_case_details(driver)
+                # State
+                state_dropdown = Select(
+                    wait.until(
+                        EC.presence_of_element_located((By.ID, "sess_state_code"))
+                    )
+                )
+                state_dropdown.select_by_visible_text(state)
+                time.sleep(3)
 
-                case_data["state"] = state
-                case_data["district"] = district
-                case_data["court_complex"] = court_complex
+                # District
+                dist_dropdown = Select(
+                    wait.until(
+                        EC.presence_of_element_located((By.ID, "sess_dist_code"))
+                    )
+                )
+                dist_dropdown.select_by_visible_text(district)
+                time.sleep(3)
 
-                save_to_mongodb(case_data)
+                # Court complex
+                court_dropdown = Select(
+                    wait.until(
+                        EC.presence_of_element_located((By.ID, "court_complex_code"))
+                    )
+                )
+                court_dropdown.select_by_visible_text(court_complex)
+                time.sleep(2)
 
-                # Go back to results page
-                driver.back()
-                time.sleep(3)  # Let it load before next iteration
+                # Close any "validateError" modal if present
+                try:
+                    driver.execute_script("closeModel({modal_id:'validateError'})")
+                    time.sleep(2)
+                except:
+                    pass
 
-                print(f"Done: {i + 1}/{len(view_buttons)}", end="\r")
+                # Case type button
+                case_type_button = wait.until(
+                    EC.element_to_be_clickable((By.ID, "casetype-tabMenu"))
+                )
+                case_type_button.click()
+                time.sleep(3)
 
-            print("\nAll cases processed. Stored in DB.")
+                # Select "CS (COMM) - CIVIL SUIT (COMMERCIAL)"
+                case_type_dropdown = Select(
+                    wait.until(EC.presence_of_element_located((By.ID, "case_type_2")))
+                )
+                case_type_dropdown.select_by_visible_text(case_type_option)
 
-        except Exception as e:
-            print(f"An error occurred: {str(e)}")
+                # Year input
+                year_input = wait.until(
+                    EC.presence_of_element_located((By.ID, "search_year"))
+                )
+                year_input.clear()
+                year_input.send_keys("2024")
 
-        finally:
-            # Cleanup
-            if os.path.exists("temp.png"):
-                os.remove("temp.png")
-            time.sleep(2)
-            driver.quit()
+                # Close any leftover modal
+                try:
+                    driver.execute_script("closeModel({modal_id:'validateError'})")
+                    time.sleep(2)
+                except:
+                    pass
+
+                # Select "Disposed" radio button
+                disposed_radio_button = wait.until(
+                    EC.element_to_be_clickable((By.ID, button_id))
+                )
+                driver.execute_script("arguments[0].click();", disposed_radio_button)
+                time.sleep(2)
+
+                # Solve Captcha
+                captcha_image_element = wait.until(
+                    EC.presence_of_element_located((By.ID, "captcha_image"))
+                )
+                captcha_image_element.screenshot("temp.png")
+                captcha_image = Image.open("temp.png")
+                captcha_text = pytesseract.image_to_string(captcha_image)
+
+                captcha_input = wait.until(
+                    EC.presence_of_element_located((By.ID, "ct_captcha_code"))
+                )
+                captcha_input.clear()
+                captcha_input.send_keys(captcha_text)
+
+                # Submit
+                driver.execute_script("submitCaseType();")
+                time.sleep(5)
+
+                # ------------------ COLLECT ALL CASE LINKS ------------------
+                # Instead of just first "View" link, get them all
+                total_cases = driver.find_element(
+                    By.XPATH, "//div[@id='showList2']/div[2]/a"
+                )
+                total_cases = total_cases.text.strip().split(":")[-1].strip()
+                print(f"Found {total_cases} cases on this page.")
+
+                # Loop over each result
+                for i in range(int(total_cases)):
+                    # Because going back can stale the references, re-find them each iteration
+                    view_buttons = driver.find_elements(By.XPATH, "//a[text()='View']")
+
+                    # Click the i-th "View" link
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView(true);", view_buttons[i]
+                    )
+                    time.sleep(1)
+                    driver.execute_script("arguments[0].click();", view_buttons[i])
+                    time.sleep(2)
+
+                    # Extract details & download PDFs
+                    case_data = extract_case_details(driver)
+
+                    case_data["state"] = state
+                    case_data["district"] = district
+                    case_data["court_complex"] = court_complex
+
+                    save_to_mongodb(case_data)
+
+                    # Go back to results page
+                    driver.back()
+                    time.sleep(3)  # Let it load before next iteration
+
+                    print(f"Done: {i + 1}/{len(view_buttons)}", end="\r")
+
+                print("\nAll cases processed. Stored in DB.")
+
+            except Exception as e:
+                print(f"An error occurred: {str(e)}")
+
+            finally:
+                # Cleanup
+                if os.path.exists("temp.png"):
+                    os.remove("temp.png")
+                time.sleep(2)
+                driver.quit()
